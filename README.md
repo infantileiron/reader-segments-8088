@@ -6,7 +6,7 @@
 
 模拟客户山岚内容社有会员运营组4人、编辑6人，试点240位订阅会员。原流程是运营人员导出 `山岚_会员周阅读_20261109.xlsx`，按阅读次数手工分组，再把名单和选题建议发给编辑。三个痛点是篇数与比例量纲混用、分群名单随工作簿修订漂移、内容建议无法追溯到当时的行为画像。本项目承接上游最近完整自然周的行为聚合，替代手工分组与名单归档，下游由编辑和运营负责人审阅内容主题、渠道假设及频次。
 
-业务模块：阅读档案（录入/完整字段修订）、特征选择（2–3维、k=2–6）、分群图谱（标准化散点、轮廓系数、原始单位画像、群成员）、触达方案（冻结名单、站内起草、负责人签核与导出）。三类核心实体为Reader、Segment、Outreach；另有用户与审计记录。不连接真实会员系统或外发服务。
+业务模块：阅读档案（录入/完整字段修订）、特征选择（2–3维、k=2–6）、分群图谱（标准化散点、轮廓系数、原始单位画像、群成员）、触达方案（冻结名单、站内起草、负责人签核与导出）、迁移与来源（成功分群打包、回传核验、来源追溯）。三类核心实体为Reader、Segment、Outreach；另有用户、迁移任务与审计记录。不连接真实会员系统或外发服务。
 
 |角色|权限和页面|典型动作|
 |---|---|---|
@@ -32,6 +32,12 @@
 Python先用StandardScaler的总体均值和总体标准差生成z=(x−mean)/std，再运行KMeans欧氏距离，`n_init=20, random_state=3107, algorithm=lloyd`。所有会员共同用于无监督聚类，不宣称预测评估。轮廓系数s=(b−a)/max(a,b)，a为同群平均距离，b为最近其他群平均距离，范围−1至1；较高表示当前标准化空间中分离更清晰，不表示业务价值。
 
 中心用scaler.inverse_transform还原为原始单位；画像另统计群内三个原始维度的均值（即使某维未选入聚类也展示其描述均值）。群号按逆变换中心排序，仅保证同一输入和seed可复核，不跨版本等价。散点图展示前两个所选标准化维度，聚类仍用所有选择维度，二维重叠不代表同群。
+
+## 跨工作台迁移
+
+各编辑部工作台独立编号，直接复制分群会串错触达名单。打包接口 `GET /segments/{id}/bundle` 仅对成功分群开放，包内含冻结档案快照、标准化尺度（scaler_mean/scale）、群组中心、成员、画像、轮廓系数及关联触达方案，并带来源工作台标识（`WORKBENCH_ID`）与内容寻址编号 bundle_id。
+
+回传 `POST /bundles/preview` 生成待核验任务：按包内冻结档案用同一seed复算成员、画像与轮廓系数，逐项核对包内结果；校验和不符、名单伪造、断引用或包编号被改均整包拒绝并留痕。预览列出新增、复用（同来源同内容）与冲突（同来源编号异内容，即同源异文）。`POST /bundles/{id}/confirm` 确认时重新核对，通过后单事务入库，失败整包回滚。版本按（来源，原编号）识别：本地同号分群各自保留，导入行获得新本地编号并记录 origin/origin_id；唯一索引加进程内锁保证并发导入与中断重试不重复建分群或方案，重放同一包返回原任务。导入档案只留在分群快照内，不写入本地档案表、不参与新训练；导入方案保留原名单与签核状态。迁移与来源页支持打包下载、回传、确认和来源追溯。
 
 样本数≤k、所选常量列、唯一特征点少于k、实际群数不足、缺失/非有限值均明确失败；不静默补值、降k或删除样本。输入验证422，重复会员编号409，队列故障503。任务失败保存failed和错误原因，修订后新建版本。创建时冻结输入，worker保存成员、中心、画像、轮廓系数、scaler参数、seed和checksum。触达草案保存版本成员副本，不随后续档案修改漂移。分群只描述行为相似性，不判断会员价值或因果关系。
 
@@ -59,7 +65,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 `frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}` 分离网络、状态、契约、共用表格/字段/状态标签、表单工具、页面和枚举。`backend/src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}` 分离HTTP、查询、算法、持久化、校验、鉴权和配置。RequestId与SecurityHeaders为两个中间件，全局错误可恢复，业务写入有审计。ORM建初表，migrations/001_initial.sql保留实际DDL，没有在线版本迁移执行器。
 
-本地开发先启动db/redis，在backend安装requirements，设置DATABASE_URL/REDIS_URL/JWT_SECRET后运行 `uvicorn src.main:app --reload`。前端静态文件通过Nginx同源代理，也可配置本地开发代理。环境变量见.env.example：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO、NETWORK_SUBNET。部署时替换演示凭据与密钥。
+本地开发先启动db/redis，在backend安装requirements，设置DATABASE_URL/REDIS_URL/JWT_SECRET后运行 `uvicorn src.main:app --reload`。前端静态文件通过Nginx同源代理，也可配置本地开发代理。环境变量见.env.example：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO、WORKBENCH_ID、NETWORK_SUBNET。WORKBENCH_ID是迁移包来源标识，多工作台部署时各配不同值。部署时替换演示凭据与密钥。迁移测试 `cd backend && python -m pytest tests/test_bundle.py`，覆盖同号异源共存、同源异文整包拒绝、伪造成员、断引用、重放与并发确认。
 
 共享枚举ROLES、STATES、FEATURES、OUTREACH_STATES在后端src/constants/enums.py和前端src/constants/enums.js；字段约束在schemas/business.py，持久化列在models/entities.py。前端共用table/fields/status，表单hooks和HTML转义utils至少两个工具。
 
